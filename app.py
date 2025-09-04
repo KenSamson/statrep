@@ -13,7 +13,8 @@ def main(page: ft.Page):
     user_id = None
 
     # Database connection
-    database_url = os.getenv("DATABASE_URL")
+    # database_url = os.getenv("DATABASE_URL")
+    database_url = "postgres://koyeb-adm:npg_wQEz1AJRury0@ep-hidden-hat-a4a8nxxa.us-east-1.pg.koyeb.app/koyebdb"
     parsed_url = urlparse(database_url)
     conn = psycopg2.connect(
         dbname=parsed_url.path[1:],
