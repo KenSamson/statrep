@@ -52,8 +52,8 @@ def main(page: ft.Page):
 
 
     # Login UI
-    username = ft.TextField(label="Username")
-    password = ft.TextField(label="Password", password=True)
+    username = ft.TextField(label="Username:")
+    password = ft.TextField(label="Password:", password=True)
     login_message = ft.Text()
 
     def login(e):
