@@ -38,6 +38,19 @@ def main(page: ft.Page):
     """)
     conn.commit()
 
+    #  Added to detect if dark
+    # Detect browser's color scheme
+    #is_dark_mode = page.evaluate_js(
+    #    'window.matchMedia("(prefers-color-scheme: dark)").matches'
+    #)
+
+    page.theme_mode = ft.ThemeMode.SYSTEM
+
+    if page.theme_mode == ft.ThemeMode.DARK:
+        page.theme_mode = ft.ThemeMode.LIGHT
+        page.update()   
+
+
     # Login UI
     username = ft.TextField(label="Username")
     password = ft.TextField(label="Password", password=True)
