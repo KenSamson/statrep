@@ -66,7 +66,7 @@ def main(page: ft.Page):
             show_form()
             page.update()
         else:
-            login_message.value = "Please enter username and password"
+            login_message.value = "Please enter username and password "
             page.update()
 
     # Form UI
