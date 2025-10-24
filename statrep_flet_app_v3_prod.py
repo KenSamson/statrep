@@ -4,6 +4,7 @@ from statrep_db_v3_prod import StatrepDatabase
 from manage_handles_v3_prod import HandlesDatabase
 from manage_locations_v3_prod import LocationDatabase
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import logging
 
 # Configure logging
@@ -12,6 +13,19 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def get_central_time():
+    """Get current time in US Central timezone (handles DST automatically)"""
+    try:
+        # Use America/Chicago which automatically handles CST/CDT
+        central_tz = ZoneInfo("America/Chicago")
+        return datetime.now(central_tz)
+    except Exception as e:
+        logger.warning(f"Could not use zoneinfo, falling back to UTC-6: {e}")
+        # Fallback: simple UTC-6 offset (doesn't handle DST)
+        from datetime import timezone, timedelta
+        central_tz = timezone(timedelta(hours=-6))
+        return datetime.now(central_tz)
 
 class StatrepApp:
     def __init__(self):
@@ -126,7 +140,7 @@ class StatrepApp:
             max_length=10
         )
         
-        # Verify PIN button (acts as "login")
+        # Verify PIN button
         verify_pin_button = ft.ElevatedButton(
             text="Verify PIN",
             on_click=lambda e: self.verify_pin_clicked(page),
@@ -135,30 +149,37 @@ class StatrepApp:
             height=40
         )
         
-        # Optional: Add a "Change PIN" link next to the PIN field
-        change_pin_link = ft.TextButton(
+        # Change PIN button (always visible alongside Verify)
+        def change_pin_button_clicked(e):
+            logger.info("Change PIN button clicked!")
+            logger.info(f"Event page: {e.page}, Control page: {e.control.page}")
+            self.show_voluntary_pin_change(e.control.page)
+        
+        change_pin_button = ft.ElevatedButton(
             text="Change PIN",
-            on_click=lambda e: self.show_voluntary_pin_change(page),
-            visible=False  # Hidden until user verifies PIN
+            on_click=change_pin_button_clicked,
+            bgcolor=Colors.ORANGE_700,
+            color=Colors.WHITE,
+            height=40
         )
         
         self.pin_row = ft.Row(
-            controls=[self.pin_field, verify_pin_button, change_pin_link],
+            controls=[self.pin_field, verify_pin_button, change_pin_button],
             spacing=10,
             alignment=ft.MainAxisAlignment.START
         )
         self.verify_pin_button = verify_pin_button  # Store reference
-        self.change_pin_link = change_pin_link  # Store reference
+        self.change_pin_button = change_pin_button  # Store reference
         self.pin_verified = False  # Track if PIN has been verified
         
         # ===== DATETIME FIELD =====
-        current_dt = datetime.now().strftime("%Y-%m-%d %H:%M")
+        current_dt = get_central_time().strftime("%Y-%m-%d %H:%M")
         self.datetime_field = ft.TextField(
             label="Report as of Date/Time",
             hint_text="YYYY-MM-DD HH:MM",
             value=current_dt,
             width=400,
-            helper_text="UTC (Zulu Time)"
+            helper_text="US Central Time (CST/CDT)"
         )
         
         # ===== STATE FIELD =====
@@ -326,12 +347,7 @@ class StatrepApp:
             
             # PIN is valid!
             self.pin_verified = True
-            
-            # Show "Change PIN" button now that they're verified
-            self.change_pin_link.visible = True
-            
-            # Hide verify button (already verified)
-            self.verify_pin_button.visible = False
+            logger.info("PIN verified successfully")
             
             # Check if PIN needs to be changed (starts with 'z')
             if self.handles_db.pin_needs_change(self.handle_field.value, self.pin_field.value):
@@ -437,10 +453,8 @@ class StatrepApp:
                 # Save handle for re-population after clear
                 submitted_handle = self.handle_field.value
                 
-                # Mark as verified and show Change PIN button (for next time)
+                # Mark as verified (for next time)
                 self.pin_verified = True
-                self.change_pin_link.visible = True
-                self.verify_pin_button.visible = False
                 
                 self.status_message.value = f"✓ STATREP submitted successfully! (ID: {result})"
                 self.status_message.color = Colors.GREEN
@@ -451,8 +465,6 @@ class StatrepApp:
                 # Re-populate handle and keep verified state for convenience
                 self.handle_field.value = submitted_handle
                 self.pin_verified = True
-                self.change_pin_link.visible = True
-                self.verify_pin_button.visible = False
             else:
                 self.status_message.value = f"✗ Error: {result}"
                 self.status_message.color = Colors.RED
@@ -462,7 +474,7 @@ class StatrepApp:
         def clear_form(e):
             self.handle_field.value = ""
             self.pin_field.value = ""
-            self.datetime_field.value = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.datetime_field.value = get_central_time().strftime("%Y-%m-%d %H:%M")
             self.state_field.value = ""
             self.neighborhood_field.value = ""
             self.location_field.value = ""
@@ -483,17 +495,191 @@ class StatrepApp:
             self.neighborhood_suggestions.controls.clear()
             # Reset PIN verification state
             self.pin_verified = False
-            self.verify_pin_button.visible = True
-            self.change_pin_link.visible = False
             if e:  # Only clear status message if user clicked clear button
                 self.status_message.value = ""
             page.update()
+        
+        def show_statreps_clicked(e):
+            """Show recent STATREPs for the same state/neighborhood"""
+            
+            # Validate that state and neighborhood are filled
+            if not self.state_field.value:
+                self.status_message.value = "✗ Please enter a state first"
+                self.status_message.color = Colors.RED
+                page.update()
+                return
+            
+            if not self.neighborhood_field.value:
+                self.status_message.value = "✗ Please enter a neighborhood first"
+                self.status_message.color = Colors.RED
+                page.update()
+                return
+            
+            state = self.state_field.value
+            neighborhood = self.neighborhood_field.value
+            
+            logger.info(f"Fetching STATREPs for {state}/{neighborhood}")
+            
+            # Query the database
+            success, results = self.db.get_latest_statreps_by_location(state, neighborhood)
+            
+            if not success:
+                self.status_message.value = f"✗ Error fetching STATREPs: {results}"
+                self.status_message.color = Colors.RED
+                page.update()
+                return
+            
+            if not results or len(results) == 0:
+                self.status_message.value = f"ℹ No STATREPs found for {state}/{neighborhood}"
+                self.status_message.color = Colors.BLUE
+                page.update()
+                return
+            
+            # Build the table
+            show_statreps_dialog(page, results, state, neighborhood)
+        
+        def show_statreps_dialog(page, results, state, neighborhood):
+            """Display STATREPs in a scrollable dialog with table"""
+            
+            # Map condition codes to descriptions
+            condition_map = {
+                "A": "All Stable",
+                "B": "Moderate Disruptions",
+                "C": "Severe Disruptions"
+            }
+            
+            # Create table rows
+            table_rows = []
+            
+            for row in results:
+                # row structure: id, amcon_handle, datetime_group, state, neighborhood, location, 
+                #                conditions, position, commercial_power, water, sanitation, 
+                #                grid_comms, transportation, comments
+                handle = row[1]
+                datetime_str = str(row[2])
+                conditions = row[6]
+                condition_desc = condition_map.get(conditions, conditions)
+                
+                if conditions == "A":
+                    # All Stable - just show that
+                    table_rows.append(
+                        ft.DataRow(
+                            cells=[
+                                ft.DataCell(ft.Text(handle, size=12)),
+                                ft.DataCell(ft.Text(datetime_str, size=12)),
+                                ft.DataCell(ft.Text(condition_desc, size=12, weight="bold", color=Colors.GREEN)),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                                ft.DataCell(ft.Text("")),
+                            ]
+                        )
+                    )
+                else:
+                    # Moderate or Severe - show all fields
+                    position = row[7] or ""
+                    power = row[8] or ""
+                    water = row[9] or ""
+                    sanitation = row[10] or ""
+                    grid_comms = row[11] or ""
+                    transportation = row[12] or ""
+                    comments = row[13] or ""
+                    
+                    color = Colors.ORANGE if conditions == "B" else Colors.RED
+                    
+                    table_rows.append(
+                        ft.DataRow(
+                            cells=[
+                                ft.DataCell(ft.Text(handle, size=12)),
+                                ft.DataCell(ft.Text(datetime_str, size=12)),
+                                ft.DataCell(ft.Text(condition_desc, size=12, weight="bold", color=color)),
+                                ft.DataCell(ft.Text(position, size=11)),
+                                ft.DataCell(ft.Text(power, size=11)),
+                                ft.DataCell(ft.Text(water, size=11)),
+                                ft.DataCell(ft.Text(sanitation, size=11)),
+                                ft.DataCell(ft.Text(grid_comms, size=11)),
+                                ft.DataCell(ft.Text(transportation, size=11)),
+                                ft.DataCell(ft.Text(comments[:30] + "..." if len(comments) > 30 else comments, size=11)),
+                            ]
+                        )
+                    )
+            
+            # Create the data table
+            data_table = ft.DataTable(
+                columns=[
+                    ft.DataColumn(ft.Text("Handle", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Date/Time", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Status", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Position", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Power", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Water", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Sanitation", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Grid/Comms", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Transport", weight="bold", size=13)),
+                    ft.DataColumn(ft.Text("Comments", weight="bold", size=13)),
+                ],
+                rows=table_rows,
+                border=ft.border.all(1, Colors.GREY_400),
+                border_radius=10,
+                horizontal_lines=ft.border.BorderSide(1, Colors.GREY_300),
+                heading_row_color=Colors.BLUE_GREY_100,
+            )
+            
+            def close_dialog(e):
+                page.close(statreps_dialog)
+            
+            # Create scrollable container for the table
+            statreps_dialog = ft.AlertDialog(
+                modal=True,
+                title=ft.Text(f"Recent STATREPs - {state} / {neighborhood}", size=20, weight="bold"),
+                content=ft.Container(
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(
+                                f"Showing {len(results)} most recent report(s)",
+                                size=14,
+                                color=Colors.GREY_700
+                            ),
+                            ft.Divider(height=10),
+                            data_table,
+                        ],
+                        scroll="auto",
+                        spacing=10,
+                    ),
+                    width=1200,
+                    height=500,
+                    padding=10,
+                ),
+                actions=[
+                    ft.ElevatedButton(
+                        text="Close",
+                        on_click=close_dialog,
+                        bgcolor=Colors.BLUE_700,
+                        color=Colors.WHITE
+                    )
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+            
+            page.open(statreps_dialog)
         
         submit_button = ft.ElevatedButton(
             text="Submit STATREP",
             on_click=submit_clicked,
             width=200,
             bgcolor=Colors.GREEN_700,
+            color=Colors.WHITE,
+            height=50
+        )
+        
+        show_statreps_button = ft.ElevatedButton(
+            text="Show STATREPs",
+            on_click=show_statreps_clicked,
+            width=200,
+            bgcolor=Colors.BLUE_700,
             color=Colors.WHITE,
             height=50
         )
@@ -507,8 +693,8 @@ class StatrepApp:
                     ft.Divider(height=20),
                     ft.Container(
                         content=ft.Text(
-                            "📝 Fill out the form below and click Submit.\n"
-                            "🔐 Optional: Click 'Verify PIN' first if you need to change your PIN.",
+                            "📝 Fill out the form and click Submit.\n"
+                            "🔐 Verify PIN to auto-fill from your last report, or Change PIN if needed.",
                             size=13,
                             color=Colors.GREY_700,
                             italic=True
@@ -538,8 +724,8 @@ class StatrepApp:
                     # Buttons
                     ft.Divider(height=20),
                     ft.Row(
-                        controls=[submit_button],
-                        spacing=10
+                        controls=[submit_button, show_statreps_button],
+                        spacing=20
                     ),
                 ],
                 spacing=10,
@@ -611,16 +797,14 @@ class StatrepApp:
             success, error = self.handles_db.change_pin(handle, new_pin)
             
             if success:
-                # Close dialog
-                pin_change_dialog.open = False
+                # Close dialog using correct Flet API
+                page.close(pin_change_dialog)
                 
                 # Update the PIN field with new PIN so verification passes
                 self.pin_field.value = new_pin
                 
                 # Mark as verified (they just changed from temp PIN)
                 self.pin_verified = True
-                self.verify_pin_button.visible = False
-                self.change_pin_link.visible = True
                 
                 # Pre-fill their last STATREP data if any
                 success_fetch, last_statrep = self.db.get_last_statrep_for_handle(handle)
@@ -678,20 +862,23 @@ class StatrepApp:
             actions_alignment=ft.MainAxisAlignment.CENTER,
         )
         
-        page.dialog = pin_change_dialog
-        pin_change_dialog.open = True
-        page.update()
+        page.open(pin_change_dialog)
     
     def show_voluntary_pin_change(self, page):
         """Show dialog for voluntary PIN change (user-initiated)"""
         
+        logger.info(f"show_voluntary_pin_change called, page object: {page}")
+        logger.info(f"Page type: {type(page)}")
+        
         if not self.handle_field.value:
+            logger.warning("No handle selected")
             self.status_message.value = "Please select a handle first"
             self.status_message.color = Colors.RED
             page.update()
             return
         
         handle = self.handle_field.value
+        logger.info(f"Showing voluntary PIN change dialog for handle: {handle}")
         
         # Dialog fields
         old_pin_field = ft.TextField(
@@ -761,8 +948,8 @@ class StatrepApp:
             success, error = self.handles_db.change_pin(handle, new_pin)
             
             if success:
-                # Close dialog
-                voluntary_pin_dialog.open = False
+                # Close dialog using correct Flet API
+                page.close(voluntary_pin_dialog)
                 
                 # Update the PIN field with new PIN
                 self.pin_field.value = new_pin
@@ -777,29 +964,31 @@ class StatrepApp:
                 page.update()
         
         def cancel_clicked(e):
-            voluntary_pin_dialog.open = False
-            page.update()
+            page.close(voluntary_pin_dialog)
         
         # Create the dialog
         voluntary_pin_dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Change Your PIN", size=20, weight="bold"),
-            content=ft.Column(
-                controls=[
-                    ft.Text(
-                        f"Changing PIN for: {handle}",
-                        size=14,
-                        weight="bold"
-                    ),
-                    ft.Divider(height=20),
-                    old_pin_field,
-                    new_pin_field,
-                    confirm_pin_field,
-                    dialog_status,
-                ],
-                tight=True,
-                spacing=10,
-                width=400
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text(
+                            f"Changing PIN for: {handle}",
+                            size=14,
+                            weight="bold"
+                        ),
+                        ft.Divider(height=20),
+                        old_pin_field,
+                        new_pin_field,
+                        confirm_pin_field,
+                        dialog_status,
+                    ],
+                    tight=True,
+                    spacing=10,
+                ),
+                width=400,
+                padding=20
             ),
             actions=[
                 ft.TextButton(
@@ -816,9 +1005,13 @@ class StatrepApp:
             actions_alignment=ft.MainAxisAlignment.END,
         )
         
-        page.dialog = voluntary_pin_dialog
-        voluntary_pin_dialog.open = True
-        page.update()
+        logger.info(f"Dialog object created: {voluntary_pin_dialog}")
+        logger.info(f"About to open dialog for handle: {handle}")
+        
+        # Use the correct Flet API to open dialog
+        page.open(voluntary_pin_dialog)
+        
+        logger.info("Dialog opened with page.open()")
     
     def filter_handles(self, e, page):
         """Filter handles based on user input"""

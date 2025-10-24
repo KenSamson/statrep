@@ -118,6 +118,36 @@ class StatrepDatabase:
             logger.error(f"Query failed: {str(e)}")
             return False, str(e)
     
+    def get_latest_statreps_by_location(self, state, neighborhood):
+        """
+        Get the most recent STATREP for each handle in the given state/neighborhood.
+        Returns list of tuples with most recent report per handle.
+        """
+        try:
+            # Query to get the most recent STATREP for each handle in the location
+            query = """
+                SELECT s.*
+                FROM statrep s
+                INNER JOIN (
+                    SELECT amcon_handle, MAX(datetime_group) as max_datetime
+                    FROM statrep
+                    WHERE state = :1 AND neighborhood = :2
+                    GROUP BY amcon_handle
+                ) latest
+                ON s.amcon_handle = latest.amcon_handle 
+                AND s.datetime_group = latest.max_datetime
+                WHERE s.state = :3 AND s.neighborhood = :4
+                ORDER BY s.datetime_group DESC
+            """
+            
+            self.cursor.execute(query, (state, neighborhood, state, neighborhood))
+            results = self.cursor.fetchall()
+            logger.info(f"Retrieved {len(results)} latest STATREPs for {state}/{neighborhood}")
+            return True, results
+        except Exception as e:
+            logger.error(f"Query failed: {str(e)}")
+            return False, str(e)
+    
     def close(self):
         """Close the database connection"""
         try:
