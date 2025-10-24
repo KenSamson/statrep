@@ -37,7 +37,8 @@ class StatrepApp:
         page.title = "ReadyCorps STATREP Submission"
         page.theme_mode = "light"
         page.padding = 20
-        page.scroll = "auto"
+        # Scrolling is handled by Container, not page level
+        page.horizontal_alignment = ft.CrossAxisAlignment.START
         
         # Status message (for connection errors, etc.)
         connection_status = ft.Text(value="", size=14)
@@ -131,6 +132,7 @@ class StatrepApp:
         )
         
         # ===== PIN FIELD =====
+        # Will set on_submit after verify_pin_clicked is defined
         self.pin_field = ft.TextField(
             label="PIN",
             hint_text="Enter your 4-digit PIN",
@@ -166,7 +168,8 @@ class StatrepApp:
         self.pin_row = ft.Row(
             controls=[self.pin_field, verify_pin_button, change_pin_button],
             spacing=10,
-            alignment=ft.MainAxisAlignment.START
+            alignment=ft.MainAxisAlignment.START,
+            wrap=True  # Allow wrapping on small screens
         )
         self.verify_pin_button = verify_pin_button  # Store reference
         self.change_pin_button = change_pin_button  # Store reference
@@ -375,6 +378,9 @@ class StatrepApp:
         
         self.verify_pin_clicked = verify_pin_clicked
         
+        # Now set the on_submit handler for the PIN field
+        self.pin_field.on_submit = lambda e: verify_pin_clicked(page)
+        
         # Submit button handler
         def submit_clicked(e):
             # Validate required fields
@@ -400,11 +406,9 @@ class StatrepApp:
                 
                 # Check if PIN needs to be changed (starts with 'z')
                 if self.handles_db.pin_needs_change(self.handle_field.value, self.pin_field.value):
-                    # Show forced change dialog - mark as verified after they change
                     self.show_pin_change_dialog(self.handle_field.value, page)
-                    return  # Don't submit yet, wait for PIN change
+                    return
             
-            # PIN is valid, continue with submission
             if not self.datetime_field.value:
                 self.status_message.value = "✗ Please enter date/time"
                 self.status_message.color = Colors.RED
@@ -541,12 +545,69 @@ class StatrepApp:
         def show_statreps_dialog(page, results, state, neighborhood):
             """Display STATREPs in a scrollable dialog with table"""
             
+            import csv
+            import io
+            import base64
+            from datetime import datetime
+            
             # Map condition codes to descriptions
             condition_map = {
                 "A": "All Stable",
                 "B": "Moderate Disruptions",
                 "C": "Severe Disruptions"
             }
+            
+            def copy_csv_to_clipboard(e):
+                """Generate CSV and copy to clipboard"""
+                # Create CSV in memory
+                output = io.StringIO()
+                csv_writer = csv.writer(output)
+                
+                # Write header
+                csv_writer.writerow([
+                    "Handle", "Date/Time", "State", "Neighborhood", "Location", 
+                    "Status", "Position", "Power", "Water", "Sanitation", 
+                    "Grid/Comms", "Transport", "Comments"
+                ])
+                
+                # Write data rows
+                for row in results:
+                    # row structure: id, amcon_handle, datetime_group, state, neighborhood, location, 
+                    #                conditions, position, commercial_power, water, sanitation, 
+                    #                grid_comms, transportation, comments
+                    condition_desc = condition_map.get(row[6], row[6])
+                    csv_writer.writerow([
+                        row[1],  # handle
+                        str(row[2]),  # datetime
+                        row[3],  # state
+                        row[4],  # neighborhood
+                        row[5],  # location
+                        condition_desc,  # conditions
+                        row[7] or "",  # position
+                        row[8] or "",  # power
+                        row[9] or "",  # water
+                        row[10] or "",  # sanitation
+                        row[11] or "",  # grid_comms
+                        row[12] or "",  # transportation
+                        row[13] or "",  # comments
+                    ])
+                
+                # Get CSV content
+                csv_content = output.getvalue()
+                output.close()
+                
+                # Copy to clipboard
+                page.set_clipboard(csv_content)
+                
+                # Show success message
+                page.snack_bar = ft.SnackBar(
+                    content=ft.Text("✓ CSV data copied to clipboard! Paste into Excel or text editor."),
+                    bgcolor=Colors.GREEN_700,
+                    duration=3000
+                )
+                page.snack_bar.open = True
+                page.update()
+            
             
             # Create table rows
             table_rows = []
@@ -590,6 +651,9 @@ class StatrepApp:
                     
                     color = Colors.ORANGE if conditions == "B" else Colors.RED
                     
+                    # Show full comments without truncation
+                    # Let the row height expand to fit all text
+                    
                     table_rows.append(
                         ft.DataRow(
                             cells=[
@@ -602,7 +666,17 @@ class StatrepApp:
                                 ft.DataCell(ft.Text(sanitation, size=11)),
                                 ft.DataCell(ft.Text(grid_comms, size=11)),
                                 ft.DataCell(ft.Text(transportation, size=11)),
-                                ft.DataCell(ft.Text(comments[:30] + "..." if len(comments) > 30 else comments, size=11)),
+                                ft.DataCell(
+                                    ft.Container(
+                                        content=ft.Text(
+                                            comments,  # Full comments, no truncation
+                                            size=11,
+                                            selectable=True,
+                                            no_wrap=False,  # Allow text wrapping
+                                        ),
+                                        width=400,  # Wide enough for comments
+                                    )
+                                ),
                             ]
                         )
                     )
@@ -631,29 +705,60 @@ class StatrepApp:
             def close_dialog(e):
                 page.close(statreps_dialog)
             
-            # Create scrollable container for the table
+            # Use the same scrolling pattern that works on the main screen
+            # Step 1: Put table in a Row for horizontal scrolling
+            horizontal_table_row = ft.Row(
+                controls=[data_table],
+                scroll=ft.ScrollMode.ALWAYS,
+                height=600,  # Increased to accommodate taller rows
+            )
+            
+            # Step 2: Put the Row in a Column for vertical scrolling
+            dialog_content_column = ft.Column(
+                controls=[
+                    ft.Text(
+                        f"Showing {len(results)} most recent report(s)",
+                        size=14,
+                        color=Colors.GREY_700
+                    ),
+                    ft.Divider(height=10),
+                    horizontal_table_row,  # The horizontally scrollable row
+                ],
+                spacing=10,
+                scroll=ft.ScrollMode.ALWAYS,  # Vertical scrolling
+                height=650,  # Increased Column height
+            )
+            
+            # Step 3: Wrap Column in another Row for the outer container
+            dialog_outer_row = ft.Row(
+                controls=[dialog_content_column],
+                scroll=ft.ScrollMode.ALWAYS,
+                height=700,  # Larger than Column
+            )
+            
+            # Step 4: Wrap in Container with explicit dimensions
+            scrollable_container = ft.Container(
+                content=dialog_outer_row,
+                width=1000,  # Wide container
+                height=750,  # Increased to show more content
+                padding=10,
+                border=ft.border.all(1, Colors.GREY_400),
+                border_radius=10,
+            )
+            
+            # Create AlertDialog
             statreps_dialog = ft.AlertDialog(
                 modal=True,
                 title=ft.Text(f"Recent STATREPs - {state} / {neighborhood}", size=20, weight="bold"),
-                content=ft.Container(
-                    content=ft.Column(
-                        controls=[
-                            ft.Text(
-                                f"Showing {len(results)} most recent report(s)",
-                                size=14,
-                                color=Colors.GREY_700
-                            ),
-                            ft.Divider(height=10),
-                            data_table,
-                        ],
-                        scroll="auto",
-                        spacing=10,
-                    ),
-                    width=1200,
-                    height=500,
-                    padding=10,
-                ),
+                content=scrollable_container,
                 actions=[
+                    ft.ElevatedButton(
+                        text="Copy CSV",
+                        icon=ft.Icons.CONTENT_COPY,
+                        on_click=copy_csv_to_clipboard,
+                        bgcolor=Colors.GREEN_700,
+                        color=Colors.WHITE
+                    ),
                     ft.ElevatedButton(
                         text="Close",
                         on_click=close_dialog,
@@ -684,54 +789,78 @@ class StatrepApp:
             height=50
         )
         
-        # Build the page
-        page.add(
-            ft.Column(
-                controls=[
+        # Build the page with improved mobile scrollability
+        # Create the main content column with vertical scrolling
+        main_content_column = ft.Column(
+            controls=[
+                ft.Row([
                     ft.Text("ReadyCorps STATREP Submission", size=32, weight="bold"),
-                    ft.Text("Use this form to submit your Status Report", size=16),
-                    ft.Divider(height=20),
-                    ft.Container(
-                        content=ft.Text(
-                            "📝 Fill out the form and click Submit.\n"
-                            "🔐 Verify PIN to auto-fill from your last report, or Change PIN if needed.",
-                            size=13,
-                            color=Colors.GREY_700,
-                            italic=True
-                        ),
-                        padding=ft.padding.only(left=10, bottom=10)
+                    ft.Text("v3.20", size=14, color=Colors.GREY_600, italic=True),
+                ], alignment=ft.MainAxisAlignment.START, spacing=10),
+                ft.Text("Use this form to submit your Status Report", size=16),
+                ft.Divider(height=20),
+                ft.Container(
+                    content=ft.Text(
+                        "📝 Start typing your handle, when you see it press tab, then arrow to it and hit enter.\n"
+                        "🔐 Fill in your pin, and hit enter or click verify pin.  \n\nFrom there you can submit, or see recent statreps.\nScroll to bottom to see the buttons.",
+                        size=13,
+                        color=Colors.GREY_700,
+                        italic=True
                     ),
-                    self.status_message,
-                    ft.Divider(height=20),
-                    
-                    # Required fields
-                    self.handle_field,
-                    self.handle_suggestions,
-                    self.pin_row,
-                    self.datetime_field,
-                    self.state_field,
-                    self.state_suggestions,
-                    self.neighborhood_field,
-                    self.neighborhood_suggestions,
-                    self.location_field,
-                    
-                    ft.Text("Current Conditions:", size=16, weight="bold"),
-                    self.conditions_group,
-                    
-                    # Optional fields (hidden by default)
-                    self.optional_fields,
-                    
-                    # Buttons
-                    ft.Divider(height=20),
-                    ft.Row(
-                        controls=[submit_button, show_statreps_button],
-                        spacing=20
-                    ),
-                ],
-                spacing=10,
-                scroll="auto"
-            )
+                    padding=ft.padding.only(left=10, bottom=10)
+                ),
+                self.status_message,
+                ft.Divider(height=20),
+                
+                # Required fields
+                self.handle_field,
+                self.handle_suggestions,
+                self.pin_row,
+                self.datetime_field,
+                self.state_field,
+                self.state_suggestions,
+                self.neighborhood_field,
+                self.neighborhood_suggestions,
+                self.location_field,
+                
+                ft.Text("Current Conditions:", size=16, weight="bold"),
+                self.conditions_group,
+                
+                # Optional fields (hidden by default)
+                self.optional_fields,
+                
+                # Buttons
+                ft.Divider(height=20),
+                ft.Row(
+                    controls=[submit_button, show_statreps_button],
+                    spacing=20,
+                    wrap=True  # Allow wrapping on small screens
+                ),
+            ],
+            spacing=10,
+            scroll=ft.ScrollMode.ALWAYS,  # Enable vertical scrolling
+            height=1000,  # Increased height to show more content when space available
+            horizontal_alignment=ft.CrossAxisAlignment.START,
         )
+        
+        # Wrap in a Row for horizontal scrolling
+        horizontal_scroll_row = ft.Row(
+            controls=[main_content_column],
+            scroll=ft.ScrollMode.ALWAYS,  # Enable horizontal scrolling
+            height=1050,  # Larger than Column height
+        )
+        
+        # Wrap in a container with dimensions
+        scrollable_main = ft.Container(
+            content=horizontal_scroll_row,
+            padding=10,
+            expand=True,  # Fill available space
+            height=1100,  # Larger than Row height to enable scrolling
+            border=ft.border.all(1, Colors.GREY_400),
+        )
+        
+        # Add the scrollable content to the page
+        page.add(scrollable_main)
         
         # Cleanup on close
         def on_close(e):
@@ -748,25 +877,32 @@ class StatrepApp:
     def show_pin_change_dialog(self, handle, page):
         """Show modal dialog to force PIN change for temporary PINs"""
         
-        # Dialog fields
+        logger.info(f"Showing PIN change dialog for handle: {handle}")
+        
+        # Create dialog fields
+        dialog_status = ft.Text(
+            value="Your temporary PIN must be changed before you can submit.",
+            color=Colors.ORANGE,
+            size=14,
+            weight="bold"
+        )
+        
         new_pin_field = ft.TextField(
             label="New PIN",
-            hint_text="Enter new PIN (4+ characters)",
+            hint_text="At least 4 characters",
             password=True,
             can_reveal_password=True,
-            width=300,
-            autofocus=True
+            autofocus=True,
+            width=300
         )
         
         confirm_pin_field = ft.TextField(
             label="Confirm New PIN",
-            hint_text="Re-enter new PIN",
+            hint_text="Re-enter your new PIN",
             password=True,
             can_reveal_password=True,
             width=300
         )
-        
-        dialog_status = ft.Text(value="", color=Colors.RED, size=12)
         
         def change_pin_clicked(e):
             # Validate inputs
@@ -784,12 +920,12 @@ class StatrepApp:
                 return
             
             if new_pin != confirm_pin:
-                dialog_status.value = "PINs do not match"
+                dialog_status.value = "New PINs do not match"
                 page.update()
                 return
             
             if new_pin.lower().startswith('z'):
-                dialog_status.value = "New PIN cannot start with 'z' (reserved for temporary PINs)"
+                dialog_status.value = "PIN cannot start with 'z' (reserved for temporary PINs)"
                 page.update()
                 return
             
@@ -800,21 +936,14 @@ class StatrepApp:
                 # Close dialog using correct Flet API
                 page.close(pin_change_dialog)
                 
-                # Update the PIN field with new PIN so verification passes
+                # Update the PIN field with new PIN
                 self.pin_field.value = new_pin
                 
-                # Mark as verified (they just changed from temp PIN)
+                # Mark as verified since we just changed it
                 self.pin_verified = True
                 
-                # Pre-fill their last STATREP data if any
-                success_fetch, last_statrep = self.db.get_last_statrep_for_handle(handle)
-                if success_fetch and last_statrep:
-                    self.state_field.value = last_statrep[3]
-                    self.neighborhood_field.value = last_statrep[4]
-                    self.location_field.value = last_statrep[5]
-                
                 # Show success message
-                self.status_message.value = f"✓ PIN changed successfully! You can now submit reports."
+                self.status_message.value = f"✓ PIN changed successfully! You can now submit."
                 self.status_message.color = Colors.GREEN
                 
                 page.update()
@@ -824,32 +953,27 @@ class StatrepApp:
         
         # Create the dialog
         pin_change_dialog = ft.AlertDialog(
-            modal=True,  # User must change PIN before continuing
+            modal=True,
             title=ft.Text("Change Your PIN", size=20, weight="bold"),
-            content=ft.Column(
-                controls=[
-                    ft.Text(
-                        f"Welcome, {handle}!",
-                        size=16,
-                        weight="bold"
-                    ),
-                    ft.Text(
-                        "Your PIN starts with 'z' which is temporary.",
-                        size=14
-                    ),
-                    ft.Text(
-                        "Please change it to your own PIN to continue.",
-                        size=14,
-                        color=Colors.BLUE_700
-                    ),
-                    ft.Divider(height=20),
-                    new_pin_field,
-                    confirm_pin_field,
-                    dialog_status,
-                ],
-                tight=True,
-                spacing=10,
-                width=400
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text(
+                            f"Changing PIN for: {handle}",
+                            size=14,
+                            weight="bold"
+                        ),
+                        ft.Divider(height=20),
+                        dialog_status,
+                        ft.Divider(height=10),
+                        new_pin_field,
+                        confirm_pin_field,
+                    ],
+                    tight=True,
+                    spacing=10,
+                ),
+                width=400,
+                padding=20
             ),
             actions=[
                 ft.ElevatedButton(
@@ -859,40 +983,44 @@ class StatrepApp:
                     color=Colors.WHITE
                 )
             ],
-            actions_alignment=ft.MainAxisAlignment.CENTER,
+            actions_alignment=ft.MainAxisAlignment.END,
         )
         
+        # Use the correct Flet API to open dialog
         page.open(pin_change_dialog)
     
     def show_voluntary_pin_change(self, page):
-        """Show dialog for voluntary PIN change (user-initiated)"""
+        """Show dialog for voluntary PIN change (user clicks 'Change PIN' button)"""
         
-        logger.info(f"show_voluntary_pin_change called, page object: {page}")
-        logger.info(f"Page type: {type(page)}")
+        handle = self.handle_field.value
         
-        if not self.handle_field.value:
-            logger.warning("No handle selected")
-            self.status_message.value = "Please select a handle first"
+        if not handle:
+            self.status_message.value = "✗ Please select a handle first"
             self.status_message.color = Colors.RED
             page.update()
             return
         
-        handle = self.handle_field.value
         logger.info(f"Showing voluntary PIN change dialog for handle: {handle}")
         
-        # Dialog fields
+        # Create dialog fields
+        dialog_status = ft.Text(
+            value="",
+            color=Colors.RED,
+            size=14
+        )
+        
         old_pin_field = ft.TextField(
             label="Current PIN",
             hint_text="Enter your current PIN",
             password=True,
             can_reveal_password=True,
-            width=300,
-            autofocus=True
+            autofocus=True,
+            width=300
         )
         
         new_pin_field = ft.TextField(
             label="New PIN",
-            hint_text="Enter new PIN (4+ characters)",
+            hint_text="At least 4 characters",
             password=True,
             can_reveal_password=True,
             width=300
@@ -900,17 +1028,22 @@ class StatrepApp:
         
         confirm_pin_field = ft.TextField(
             label="Confirm New PIN",
-            hint_text="Re-enter new PIN",
+            hint_text="Re-enter your new PIN",
             password=True,
             can_reveal_password=True,
             width=300
         )
         
-        dialog_status = ft.Text(value="", color=Colors.RED, size=12)
-        
         def change_pin_clicked(e):
-            # Verify old PIN first
-            if not self.handles_db.verify_pin(handle, old_pin_field.value):
+            # Validate old PIN first
+            old_pin = old_pin_field.value
+            
+            if not old_pin:
+                dialog_status.value = "Please enter your current PIN"
+                page.update()
+                return
+            
+            if not self.handles_db.verify_pin(handle, old_pin):
                 dialog_status.value = "Current PIN is incorrect"
                 page.update()
                 return
